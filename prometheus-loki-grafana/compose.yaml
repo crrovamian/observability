@@ -1,17 +1,15 @@
 services:
   # ==================== TUS APLICACIONES ====================
-  # java-app:
-  #   build: ./java-app
-  #   ports:
-  #     - "8081:8080"
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       tag: "{{.Name}}"
-  #   networks:
-  #     - monitoring
-  #   labels:
-  #     logging: "promtail"
+  nginx-demo:
+    image: nginx:alpine
+    container_name: nginx-demo
+    ports:
+      - "80:80"
+    networks:
+      - monitoring
+    labels:
+      logging: "promtail"
+    restart: unless-stopped
 
   # ==================== MÉTRICAS ====================
   prometheus:
@@ -40,8 +38,8 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - ./loki/loki-config.yml:/etc/loki/local-config.yaml
-      - ./data/loki:/loki
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
     command: -config.file=/etc/loki/local-config.yaml
     restart: unless-stopped
     networks:
@@ -70,9 +68,9 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin123  # Cámbialo en producción
+      - GF_SECURITY_ADMIN_PASSWORD=admin  # Cámbialo en producción
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_SERVER_ROOT_URL=http://localhost:3001
       - GF_INSTALL_PLUGINS=grafana-clock-panel
 
     ports:

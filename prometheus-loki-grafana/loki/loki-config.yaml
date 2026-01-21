@@ -18,13 +18,15 @@ common:
 
 schema_config:
   configs:
-    - from: 2020-10-24
-      store: boltdb-shipper
+    - from: 2024-01-01
+      store: tsdb
       object_store: filesystem
-      schema: v11
+      schema: v13
       index:
         prefix: index_
         period: 24h
 
 limits_config:
-  retention_period: 744h  # 31 días
+  retention_period: 744h
+  allow_structured_metadata: true
+  volume_enabled: true

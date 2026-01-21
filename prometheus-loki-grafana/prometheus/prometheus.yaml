@@ -16,6 +16,6 @@ scrape_configs:
       - targets: ['node-exporter:9100']
 
   # Agrega aquí tus servicios si exponen métricas
-  # - job_name: 'mi-app'
-  #   static_configs:
-  #     - targets: ['mi-app:8081']
+  - job_name: 'nginx-demo'
+    static_configs:
+      - targets: ['nginx-demo:80']
