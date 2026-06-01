@@ -118,26 +118,38 @@ services:
       - monitoring
 
 volumes:
+  # Bind-mount local (requiere mkdir -p data/prometheus)
   prometheus_data:
     driver: local
     driver_opts:
       type: none
       o: bind
       device: ./data/prometheus
+  # Alternativa: volúmenes gestionados por Docker
+  # prometheus_data:
+  #   driver: local
       
+  # Bind-mount local (requiere mkdir -p data/grafana)
   grafana_data:
     driver: local
     driver_opts:
       type: none
       o: bind
       device: ./data/grafana
+  # Alternativa: volúmenes gestionados por Docker
+  # grafana_data:
+  #   driver: local
       
+  # Bind-mount local (requiere mkdir -p data/loki)
   loki_data:
     driver: local
     driver_opts:
       type: none
       o: bind
       device: ./data/loki
+  # Alternativa: volúmenes gestionados por Docker
+  # loki_data:
+  #   driver: local
 
 networks:
   monitoring:

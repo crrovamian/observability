@@ -24,6 +24,7 @@ Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometh
 
 ```bash
 cd prometheus-loki-grafana
+mkdir -p data/prometheus data/grafana data/loki
 docker compose up -d
 ```
 
@@ -89,13 +90,56 @@ services:
 
 ## Persistencia
 
-Los datos se almacenan en `./data/` (bind-mounts locales).
+Los datos se almacenan en `./data/` mediante bind-mounts locales. Las carpetas deben existir antes de levantar los servicios (el `mkdir -p` del inicio rápido las crea automáticamente).
 
 | Componente  | Ruta              | Retención |
 |-------------|-------------------|-----------|
 | Prometheus  | `./data/prometheus`| 200h      |
 | Grafana     | `./data/grafana`  | —         |
 | Loki        | `./data/loki`     | 744h      |
+
+### Volúmenes gestionados por Docker
+
+Si prefieres no usar bind-mounts locales y que Docker gestione los volúmenes (sin depender de carpetas en el host):
+
+1. No necesitas ejecutar `mkdir -p`.
+2. En `compose.yaml`, cambia los volúmenes de:
+
+```yaml
+volumes:
+  prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/prometheus
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/grafana
+  loki_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/loki
+```
+
+a:
+
+```yaml
+volumes:
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+```
+
+Los datos se almacenarán en el directorio de volúmenes de Docker (`/var/lib/docker/volumes/`) sin intervención manual.
 
 ## Detener y limpiar
 
