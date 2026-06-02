@@ -81,14 +81,14 @@ Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`
 
 ### Enviar trazas desde tu aplicación
 
-Agrega el SDK de OpenTelemetry en tu lenguaje y apunta al endpoint OTLP:
+Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`). Todos los ejemplos están en la carpeta [`examples/`](prometheus-loki-grafana/examples/).
 
-| Lenguaje   | Endpoint OTLP                    | SDK                                                        |
-|------------|----------------------------------|------------------------------------------------------------|
-| Python     | `otel-collector:4317` (gRPC)     | `opentelemetry-exporter-otlp-proto-grpc`                   |
-| Go         | `otel-collector:4317` (gRPC)     | `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` |
-| Java       | `http://otel-collector:4318`     | `opentelemetry-exporter-otlp` (o agente Java)              |
-| Node.js    | `otel-collector:4317` (gRPC)     | `@opentelemetry/exporter-trace-otlp-grpc`                  |
+| Lenguaje       | Framework   | Endpoint OTLP                    | Ruta                                              |
+|----------------|-------------|----------------------------------|---------------------------------------------------|
+| Python         | FastAPI     | `otel-collector:4317` (gRPC)     | [`examples/python/`](prometheus-loki-grafana/examples/python/) |
+| Go             | net/http    | `otel-collector:4317` (gRPC)     | [`examples/go/`](prometheus-loki-grafana/examples/go/) |
+| Java           | Spring Boot | `http://otel-collector:4318`     | [`examples/java/`](prometheus-loki-grafana/examples/java/) |
+| Node.js        | NestJS      | `otel-collector:4317` (gRPC)     | [`examples/nestjs/`](prometheus-loki-grafana/examples/nestjs/) |
 
 > **Requiere**: el contenedor debe estar en la red `monitoring` de Docker.
 
