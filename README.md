@@ -4,15 +4,17 @@ Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometh
 
 ## Servicios
 
-| Servicio       | Imagen                            | Puerto  | Propósito                        |
-|----------------|-----------------------------------|---------|----------------------------------|
-| `nginx-demo`   | `nginx:alpine`                    | `80`    | App demo para generar tráfico    |
-| `prometheus`   | `prom/prometheus:latest`          | `9090`  | Métricas y alertas               |
-| `loki`         | `grafana/loki:latest`             | `3100`  | Agregación de logs               |
-| `promtail`     | `grafana/promtail:latest`         | —       | Shipping de logs a Loki          |
-| `grafana`      | `grafana/grafana:latest`          | `3001`  | Dashboards (métricas + logs)     |
-| `cadvisor`     | `gcr.io/cadvisor/cadvisor:latest` | `8080`  | Métricas de contenedores         |
-| `node-exporter`| `prom/node-exporter:latest`       | `9100`  | Métricas del host                |
+| Servicio        | Imagen                                       | Puerto  | Propósito                        |
+|-----------------|----------------------------------------------|---------|----------------------------------|
+| `nginx-demo`    | `nginx:alpine`                               | `80`    | App demo para generar tráfico    |
+| `prometheus`    | `prom/prometheus:latest`                     | `9090`  | Métricas y alertas               |
+| `loki`          | `grafana/loki:latest`                        | `3100`  | Agregación de logs               |
+| `promtail`      | `grafana/promtail:latest`                    | —       | Shipping de logs a Loki          |
+| `grafana`       | `grafana/grafana:latest`                     | `3001`  | Dashboards (métricas + logs)     |
+| `cadvisor`      | `gcr.io/cadvisor/cadvisor:latest`            | `8080`  | Métricas de contenedores         |
+| `node-exporter` | `prom/node-exporter:latest`                  | `9100`  | Métricas del host                |
+| `otel-collector`| `otel/opentelemetry-collector-contrib:latest`| `4317`  | Receptor OTLP, reenvío a Jaeger  |
+| `jaeger`        | `jaegertracing/all-in-one:latest`            | `16686` | Backend y UI de trazas           |
 
 ## Requisitos
 
@@ -24,7 +26,7 @@ Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometh
 
 ```bash
 cd prometheus-loki-grafana
-mkdir -p data/prometheus data/grafana data/loki
+mkdir -p data/prometheus data/grafana data/loki data/otel-collector
 docker compose up -d
 ```
 
@@ -34,6 +36,7 @@ docker compose up -d
 |-------------|-------------------------------|---------------------|
 | Grafana     | http://localhost:3001         | `admin` / `admin`   |
 | Prometheus  | http://localhost:9090         | —                   |
+| Jaeger      | http://localhost:16686        | —                   |
 | cAdvisor    | http://localhost:8080         | —                   |
 | Loki API    | http://localhost:3100/ready   | —                   |
 
@@ -72,6 +75,23 @@ Para que Prometheus escale métricas de un servicio propio:
 curl -X POST http://localhost:9090/-/reload
 ```
 
+## Trazas (Jaeger)
+
+Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`), que las reenvía a Jaeger para almacenamiento y visualización. Jaeger está configurado como datasource en Grafana para correlacionar métricas, logs y trazas.
+
+### Enviar trazas desde tu aplicación
+
+Agrega el SDK de OpenTelemetry en tu lenguaje y apunta al endpoint OTLP:
+
+| Lenguaje   | Endpoint OTLP                    | SDK                                                        |
+|------------|----------------------------------|------------------------------------------------------------|
+| Python     | `otel-collector:4317` (gRPC)     | `opentelemetry-exporter-otlp-proto-grpc`                   |
+| Go         | `otel-collector:4317` (gRPC)     | `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc` |
+| Java       | `http://otel-collector:4318`     | `opentelemetry-exporter-otlp` (o agente Java)              |
+| Node.js    | `otel-collector:4317` (gRPC)     | `@opentelemetry/exporter-trace-otlp-grpc`                  |
+
+> **Requiere**: el contenedor debe estar en la red `monitoring` de Docker.
+
 ### Servicio en otro `compose.yaml`
 
 ```yaml
@@ -92,11 +112,12 @@ services:
 
 Los datos se almacenan en `./data/` mediante bind-mounts locales. Las carpetas deben existir antes de levantar los servicios (el `mkdir -p` del inicio rápido las crea automáticamente).
 
-| Componente  | Ruta              | Retención |
-|-------------|-------------------|-----------|
-| Prometheus  | `./data/prometheus`| 200h      |
-| Grafana     | `./data/grafana`  | —         |
-| Loki        | `./data/loki`     | 744h      |
+| Componente     | Ruta                   | Retención |
+|----------------|------------------------|-----------|
+| Prometheus     | `./data/prometheus`    | 200h      |
+| Grafana        | `./data/grafana`       | —         |
+| Loki           | `./data/loki`          | 744h      |
+| OTel Collector | `./data/otel-collector`| —         |
 
 ### Volúmenes gestionados por Docker
 

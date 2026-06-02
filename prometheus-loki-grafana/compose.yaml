@@ -117,6 +117,32 @@ services:
     networks:
       - monitoring
 
+  # ==================== TRAZAS ====================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "16686:16686"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - monitoring
+
 volumes:
   # Bind-mount local (requiere mkdir -p data/prometheus)
   prometheus_data:
