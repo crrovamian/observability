@@ -98,6 +98,46 @@ Solo tienes que estar en la red `monitoring` de Docker. Los logs a stdout de tu 
 
 > Trazas **siempre** van por OTel (SDK → OTLP). Los logs pueden ir por `filelog` (sin código) o por OTLP (con SDK). Las métricas de app van por `/metrics` (scrape) o por OTLP si ya usas el SDK de métricas.
 
+### Logs: camino A (stdout + filelog) vs camino B (OTLP desde el SDK)
+
+Para los logs de tu app hay **dos caminos válidos**, con una diferencia clave: quién los transporta.
+
+| | **A. stdout + filelog** | **B. OTLP desde el SDK** |
+|---|---|---|
+| Cómo llega | tu logger normal escribe a stdout; el collector los lee de los archivos de Docker (`filelog/docker`) | tu logger normal → puente OTel → OTLP → collector → **Loki** |
+| Código en la app | **ninguno** | configurar el log SDK de OTel + conectar tu logger |
+| `trace_id` / `span_id` | manual (tú los pones en el mensaje) | **automático** (el span activo se inyecta solo) |
+| Estado en tu stack | ✅ funciona hoy, sin tocar nada | ✅ infraestructura lista; falta el puente en la app |
+
+**La infraestructura ya soporta ambos caminos.** El pipeline `logs` del collector acepta OTLP (`otel-collector/config.yaml:76-78`) y exporta a Loki vía `otlphttp` al endpoint nativo (`http://loki:3100/otlp/v1/logs`), con `allow_structured_metadata: true` (`loki-config.yaml:31`). Es decir: si tu app manda logs por OTLP a `:4317`/`:4318`, llegan solos a Loki sin tocar la configuración del stack.
+
+El matiz está en la app: **tener el SDK de trazas no exporta "los logs normales" por OTLP**. Hace falta (1) configurar el `LoggerProvider` con un `OTLPLogExporter` y (2) puentear tu logger del framework hacia OTel. Sin ese puente, tus logs siguen yendo a stdout (camino A).
+
+#### Ejemplo: Opción B en Python (FastAPI)
+
+Coherente con `examples/python/main.py`:
+
+```python
+from opentelemetry.exporter.otlp.proto.grpc.log_exporter import OTLPLogExporter
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+import logging
+
+provider = LoggerProvider()
+provider.add_log_record_processor(
+    BatchLogRecordProcessor(OTLPLogExporter(endpoint="otel-collector:4317", insecure=True))
+)
+handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
+logging.getLogger().addHandler(handler)
+
+logging.info("log normal, ahora sale por OTLP y lleva el trace_id del span activo")
+```
+
+- Requiere `opentelemetry-sdk` y `opentelemetry-exporter-otlp-proto-grpc` (ya presentes en `examples/python/requirements.txt`).
+- El `LoggingHandler` inyecta el `trace_id`/`span_id` del span activo automáticamente → correlación trace ↔ logs en Grafana sin código extra.
+- Si además quieres que sigan saliendo a stdout (para el `filelog`), conserva tu handler de consola: puedes tener ambos handlers a la vez.
+- En Java el equivalente es el agente + `opentelemetry-logback-appender` (solo XML, sin tocar lógica).
+
 ---
 
 ## 4. Automático vs manual
