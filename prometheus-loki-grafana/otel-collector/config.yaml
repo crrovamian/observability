@@ -1,3 +1,8 @@
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol
+    create_directory: true
+
 receivers:
   otlp:
     protocols:
@@ -6,23 +11,69 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+  filelog/docker:
+    storage: file_storage
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    start_at: beginning
+    include_file_path: true
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%L%Z'
+      - type: move
+        from: attributes.log
+        to: body
+      - type: regex_parser
+        regex: '^/var/lib/docker/containers/(?P<container_id>[a-f0-9]+)/'
+        parse_from: resource["log.file.path"]
+      - type: copy
+        from: attributes.container_id
+        to: resource["container.id"]
+      - type: add
+        field: resource["service.name"]
+        value: docker
+
+  filelog/system:
+    storage: file_storage
+    include:
+      - /var/log/*.log
+    start_at: end
+    include_file_path: true
+    operators:
+      - type: add
+        field: resource["service.name"]
+        value: system
+
 processors:
   batch:
     timeout: 1s
     send_batch_size: 1024
 
 exporters:
-  otlp/jaeger:
-    endpoint: jaeger:4317
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp/v1/logs
     tls:
       insecure: true
 
   debug:
-    verbosity: detailed
+    verbosity: basic
 
 service:
+  extensions: [file_storage]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/jaeger, debug]
+      exporters: [otlp/tempo, debug]
+
+    logs:
+      receivers: [otlp, filelog/docker, filelog/system]
+      processors: [batch]
+      exporters: [otlphttp/loki, debug]

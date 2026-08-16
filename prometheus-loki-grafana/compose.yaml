@@ -7,8 +7,6 @@ services:
       - "80:80"
     networks:
       - monitoring
-    labels:
-      logging: "promtail"
     restart: unless-stopped
 
   # ==================== MÉTRICAS ====================
@@ -44,21 +42,6 @@ services:
     restart: unless-stopped
     networks:
       - monitoring
-
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    volumes:
-      - /var/log:/var/log:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./promtail/promtail-config.yaml:/etc/promtail/config.yaml
-    command: -config.file=/etc/promtail/config.yaml
-    restart: unless-stopped
-    networks:
-      - monitoring
-    depends_on:
-      - loki
 
   # ==================== VISUALIZACIÓN ====================
   grafana:
@@ -117,12 +100,16 @@ services:
     networks:
       - monitoring
 
-  # ==================== TRAZAS ====================
+  # ==================== TRAZAS Y LOGS ====================
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-collector
+    user: root
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml
+      - otelcol_data:/var/lib/otelcol
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log:ro
     ports:
       - "4317:4317"
       - "4318:4318"
@@ -130,15 +117,19 @@ services:
     networks:
       - monitoring
     depends_on:
-      - jaeger
+      - loki
+      - tempo
 
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: jaeger
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    command:
+      - '-config.file=/etc/tempo.yaml'
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo.yaml
+      - tempo_data:/var/tempo
     ports:
-      - "16686:16686"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      - "3200:3200"
     restart: unless-stopped
     networks:
       - monitoring
@@ -175,6 +166,28 @@ volumes:
       device: ./data/loki
   # Alternativa: volúmenes gestionados por Docker
   # loki_data:
+  #   driver: local
+
+  # Bind-mount local (requiere mkdir -p data/tempo)
+  tempo_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/tempo
+  # Alternativa: volúmenes gestionados por Docker
+  # tempo_data:
+  #   driver: local
+
+  # Bind-mount local (requiere mkdir -p data/otel-collector)
+  otelcol_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/otel-collector
+  # Alternativa: volúmenes gestionados por Docker
+  # otelcol_data:
   #   driver: local
 
 networks:

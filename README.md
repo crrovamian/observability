@@ -1,6 +1,6 @@
-# Observability Stack — Prometheus + Loki + Grafana
+# Observability Stack — Prometheus + Tempo + Loki + Grafana
 
-Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometheus), logs (Loki) y dashboards (Grafana) para tus contenedores, más exporters de sistema.
+Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometheus), trazas (Tempo), logs (Loki) y dashboards (Grafana) para tus contenedores, más exporters de sistema.
 
 ## Servicios
 
@@ -8,13 +8,82 @@ Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometh
 |-----------------|----------------------------------------------|---------|----------------------------------|
 | `nginx-demo`    | `nginx:alpine`                               | `80`    | App demo para generar tráfico    |
 | `prometheus`    | `prom/prometheus:latest`                     | `9090`  | Métricas y alertas               |
-| `loki`          | `grafana/loki:latest`                        | `3100`  | Agregación de logs               |
-| `promtail`      | `grafana/promtail:latest`                    | —       | Shipping de logs a Loki          |
-| `grafana`       | `grafana/grafana:latest`                     | `3001`  | Dashboards (métricas + logs)     |
+| `loki`          | `grafana/loki:latest`                        | `3100`  | Agregación de logs (ingesta OTLP) |
+| `grafana`       | `grafana/grafana:latest`                     | `3001`  | Dashboards (métricas + logs + trazas) |
 | `cadvisor`      | `gcr.io/cadvisor/cadvisor:latest`            | `8080`  | Métricas de contenedores         |
 | `node-exporter` | `prom/node-exporter:latest`                  | `9100`  | Métricas del host                |
-| `otel-collector`| `otel/opentelemetry-collector-contrib:latest`| `4317`  | Receptor OTLP, reenvío a Jaeger  |
-| `jaeger`        | `jaegertracing/all-in-one:latest`            | `16686` | Backend y UI de trazas           |
+| `otel-collector`| `otel/opentelemetry-collector-contrib:latest`| `4317`  | Receptor OTLP, logs + trazas → Loki/Tempo |
+| `tempo`         | `grafana/tempo:latest`                       | `3200`  | Backend y API de trazas          |
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+    subgraph apps["TUS APLICACIONES"]
+        app["App (ejemplos / nginx-demo)"]
+    end
+
+    subgraph agentes["RECOLECCIÓN"]
+        otel["otel-collector<br/>filelog + OTLP :4317 / :4318"]
+    end
+
+    subgraph backends["BACKENDS"]
+        tempo["Tempo<br/>:3200"]
+        prom["Prometheus<br/>:9090"]
+        loki["Loki<br/>:3100"]
+    end
+
+    subgraph infra["EXPORTERS DE SISTEMA"]
+        cadvisor["cAdvisor<br/>:8080"]
+        nodeexp["node-exporter<br/>:9100"]
+    end
+
+    grafana["Grafana<br/>:3001"]
+
+    app -->|"OTLP trazas"| otel
+    otel -->|"OTLP (gRPC)"| tempo
+    app -->|"OTLP logs (SDK)"| otel
+    app -->|"logs → stdout (filelog)"| otel
+    otel -->|"OTLP"| loki
+    app -->|"/metrics (scrape)"| prom
+    cadvisor -->|"/metrics (scrape)"| prom
+    nodeexp -->|"/metrics (scrape)"| prom
+
+    grafana -->|"query"| prom
+    grafana -->|"query"| loki
+    grafana -->|"query"| tempo
+```
+
+### ¿Es correcto ese flujo?
+
+Tu propuesta es casi correcta, con dos matices importantes:
+
+- **Trazas** ✓ — van por OTel (SDK → OTLP → collector → Tempo). Es el único caso donde el SDK de la app envía datos vía OTLP siempre.
+- **Logs** ⚠️ — normalmente **no** van "por OTel desde la app". El estándar es que la app escriba logs a `stdout` y el collector los lea de los archivos de Docker con el receiver `filelog` (esto reemplaza a Promtail). Enviar logs vía OTLP desde el SDK es posible (el pipeline de logs del collector lo acepta) pero no es la práctica común.
+- **Métricas** ⚠️ — las de infraestructura (cAdvisor, node-exporter) van directo a Prometheus ✓. Las de tu app pueden ir por **dos caminos válidos**: exponer `/metrics` y que Prometheus haga *scrape* (clásico), o exportarlas por OTLP al collector que las reenvía a Prometheus (remote write). En este stack usamos el scrape directo.
+
+### Tipos de métricas: ¿por OTel o directas?
+
+| Métrica                                    | Camino                          | Ejemplos                                              |
+|--------------------------------------------|---------------------------------|-------------------------------------------------------|
+| Contenedores / host (infraestructura)      | Directo → Prometheus (scrape)   | `container_cpu_*` (cAdvisor), `node_cpu_*` (node-exporter) |
+| Aplicación con SDK Prometheus (`/metrics`) | Directo → Prometheus (scrape)   | `http_requests_total`, `http_request_duration_seconds` (NestJS) |
+| Aplicación con SDK OTel (OTLP)             | Por collector → Prometheus      | Métricas del framework de OTel (HTTP server, runtime) |
+| Trazas                                     | OTel siempre → Tempo            | `http.server.duration`, spans de requests            |
+
+**Regla general**: si tu app ya usa un SDK Prometheus (`prom-client`, Micrometer), deja el scrape directo; si ya usas el SDK OTel, exporta métricas por OTLP al collector. No mezcles ambos para la misma métrica. Trazas siempre van por OTel.
+
+### Estándar de logs y qué nunca va en un log
+
+- **Formato**: logs estructurados a `stdout` en **JSON** (OpenTelemetry / ECS log format), con campos estables: `timestamp`, `level`, `message` y contexto (servicio, trace id, span id, request id).
+- **Cardinalidad**: en Loki las *labels* no deben tener valores de alta cardinalidad (ids de usuario, ids de request, ips). Eso va dentro del `message`, no como label. Las labels son para agrupar: `job`, `service_name`, `container_name`, `level`.
+- **Trazabilidad**: un log que pertenece a una traza debe incluir `trace_id` / `span_id` para la correlación trace → logs en Grafana.
+- **Qué NUNCA va en un log**:
+  - Credenciales y secretos: passwords, tokens, API keys, JWT, cookies.
+  - Datos personales / sensibles (PII): emails, DNIs, direcciones, teléfonos, datos de tarjetas.
+  - Bodies completos de requests/responses con payloads sensibles (típicamente solo hashes o redactado).
+  - Secrets de configuración, variables de entorno, cadenas de conexión.
+
 
 ## Requisitos
 
@@ -26,7 +95,7 @@ Stack local de observabilidad con Docker Compose. Proporciona métricas (Prometh
 
 ```bash
 cd prometheus-loki-grafana
-mkdir -p data/prometheus data/grafana data/loki data/otel-collector
+mkdir -p data/prometheus data/grafana data/loki data/tempo data/otel-collector
 docker compose up -d
 ```
 
@@ -36,24 +105,22 @@ docker compose up -d
 |-------------|-------------------------------|---------------------|
 | Grafana     | http://localhost:3001         | `admin` / `admin`   |
 | Prometheus  | http://localhost:9090         | —                   |
-| Jaeger      | http://localhost:16686        | —                   |
+| Tempo       | http://localhost:3200         | —                   |
 | cAdvisor    | http://localhost:8080         | —                   |
 | Loki API    | http://localhost:3100/ready   | —                   |
 
 ## Logs (Loki)
 
-Promtail descubre automáticamente contenedores con la label `logging=promtail` a través del socket de Docker. No importa si el contenedor está en otro `compose.yaml` o es un `docker run` independiente:
+El `otel-collector` recolecta los logs con el receiver `filelog`:
 
-```yaml
-labels:
-  logging: "promtail"
-```
+- **Contenedores**: lee los archivos JSON de Docker (`/var/lib/docker/containers/*/*-json.log`). Ya no hace falta la label `logging=promtail`: recolecta los logs de **todos** los contenedores. Cada log lleva como recurso `container.id` y `service.name=docker`.
+- **Sistema**: lee `/var/log/*.log` con `service.name=system`.
 
-```bash
-docker run --label logging=promtail mi-imagen
-```
+Luego exporta los logs vía **OTLP** al endpoint nativo de Loki (`/otlp/v1/logs`, Loki v3+). El exporter `loki` de OTel está deprecado/removido; por eso se usa `otlphttp`. Los logs OTLP llegan con los atributos como *structured metadata* (configurado con `allow_structured_metadata: true` en Loki).
 
-No necesita estar en la red `monitoring` — Promtail lee los logs del socket directamente.
+Si tu app usa el **SDK OTel**, también puede enviar logs directamente por OTLP al collector (puerto `4317`/`4318`): el pipeline `logs` del collector lo acepta.
+
+> **Requiere**: el contenedor debe estar en la red `monitoring` de Docker.
 
 ## Métricas (Prometheus)
 
@@ -75,9 +142,9 @@ Para que Prometheus escale métricas de un servicio propio:
 curl -X POST http://localhost:9090/-/reload
 ```
 
-## Trazas (Jaeger)
+## Trazas (Tempo)
 
-Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`), que las reenvía a Jaeger para almacenamiento y visualización. Jaeger está configurado como datasource en Grafana para correlacionar métricas, logs y trazas.
+Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`), que las reenvía a Tempo para almacenamiento y visualización. Tempo está configurado como datasource en Grafana para correlacionar métricas, logs y trazas. Acepta OTLP nativo, por lo que el collector no necesita traducir el formato.
 
 ### Enviar trazas desde tu aplicación
 
@@ -94,6 +161,8 @@ Las aplicaciones envían trazas vía **OTLP** al `otel-collector` (puerto `4317`
 
 ### Servicio en otro `compose.yaml`
 
+Solo necesita estar en la red `monitoring`. Los logs se recolectan automáticamente (el `filelog` receiver lee los archivos de Docker) y las trazas llegan por OTLP:
+
 ```yaml
 networks:
   monitoring:
@@ -104,8 +173,6 @@ services:
     image: mi-app
     networks:
       - monitoring
-    labels:
-      logging: "promtail"
 ```
 
 ## Persistencia
@@ -117,6 +184,7 @@ Los datos se almacenan en `./data/` mediante bind-mounts locales. Las carpetas d
 | Prometheus     | `./data/prometheus`    | 200h      |
 | Grafana        | `./data/grafana`       | —         |
 | Loki           | `./data/loki`          | 744h      |
+| Tempo          | `./data/tempo`         | 336h (2w) |
 | OTel Collector | `./data/otel-collector`| —         |
 
 ### Volúmenes gestionados por Docker
@@ -146,6 +214,18 @@ volumes:
       type: none
       o: bind
       device: ./data/loki
+  tempo_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/tempo
+  otelcol_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/otel-collector
 ```
 
 a:
@@ -157,6 +237,10 @@ volumes:
   grafana_data:
     driver: local
   loki_data:
+    driver: local
+  tempo_data:
+    driver: local
+  otelcol_data:
     driver: local
 ```
 
@@ -175,4 +259,5 @@ rm -rf data/
 - **Scrape targets**: editar `prometheus/prometheus.yaml`
 - **Datasources de Grafana**: editar `grafana/provisioning/datasources/datasources.yaml`
 - **Retención y esquema de Loki**: editar `loki/loki-config.yaml`
-- **Config de Promtail**: editar `promtail/promtail-config.yaml`
+- **Recolección de logs y trazas**: editar `otel-collector/config.yaml`
+- **Retención y almacenamiento de trazas**: editar `tempo/tempo.yaml`
