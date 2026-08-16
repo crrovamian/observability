@@ -204,7 +204,91 @@ Son librerías/agentes que **observan los frameworks sin que toques tu código**
 
 ---
 
-## 6. Microservicios y propagación del contexto
+## 6. Configuración en números
+
+¿Cuántas configuraciones hay que hacer realmente? Se reparten en tres capas.
+
+### Capa 0 — Collector (infraestructura)
+
+`otel-collector/config.yaml`, **un solo archivo** y **ya está hecho**. Para cada app nueva: **0 cambios**.
+
+| Pieza | Cantidad | Detalle |
+|-------|:---:|---------|
+| Receivers | 3 | `otlp`, `filelog/docker`, `filelog/system` |
+| Processors | 1 | `batch` |
+| Exporters | 3 | `otlp/tempo`, `otlphttp/loki`, `debug` |
+| Pipelines | 2 | `traces` y `logs` |
+
+No hay pipeline de **metrics**: Prometheus hace *scrape* directo a tu `/metrics`. Si algún día quieres métricas por OTLP al collector, agregas un pipeline `metrics` (el receiver `otlp` ya existe).
+
+### Capa 1 — App por variables de entorno (auto-config / agente Java)
+
+**El endpoint del exporter se configura UNA vez y cubre las 3 señales** (`OTEL_EXPORTER_OTLP_ENDPOINT`): OTLP transporta traces + metrics + logs por el mismo destino.
+
+| # | Variable | Valor | ¿Obligatoria? |
+|---|----------|-------|:---:|
+| 1 | `OTEL_SERVICE_NAME` | `mi-servicio` | ✅ |
+| 2 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` (o `otel-collector:4317`) | ✅ |
+| 3–5 | `OTEL_TRACES_EXPORTER` / `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` | `otlp` | ⬜ (default `otlp`) |
+
+→ **Mínimo: 2 variables** para traces + logs + metrics. Máximo 5 si activas los enablements explícitamente.
+
+Solo necesitas sobreescribir el endpoint **por señal** si cada una va a un destino distinto: `OTEL_TRACES_EXPORTER_OTLP_ENDPOINT`, `OTEL_METRICS_EXPORTER_OTLP_ENDPOINT`, `OTEL_LOGS_EXPORTER_OTLP_ENDPOINT`.
+
+### Capa 2 — App en código (SDK manual)
+
+Si no usas auto-config, hay **un provider + un exporter por señal** que quieras emitir:
+
+| Señal | Provider | Exporter |
+|-------|----------|----------|
+| Trazas | `TracerProvider` | `OTLPSpanExporter` |
+| Métricas | `MeterProvider` | `OTLPMetricExporter` |
+| Logs (camino B) | `LoggerProvider` + bridge (`LoggingHandler`) | `OTLPLogExporter` |
+
+### Capa 3 — Instrumentación (por app)
+
+1 sola por lenguaje: agente Java (`-javaagent`), `FastAPIInstrumentor.instrument_app(app)` en Python, registro del `sdk-node` en Node, wrappers por librería en Go.
+
+### Total
+
+| Escenario | Configuración |
+|-----------|---------------|
+| Trazas, con auto-config | 2 env vars (capa 1) + 1 instrumentación (capa 3) |
+| Trazas + logs camino B, auto-config | 2 env vars + 1 instrumentación + 1 bridge de logs |
+| Trazas + metrics de negocio, SDK manual | 2 env vars + 2 providers/exporters + tu código de métricas |
+
+---
+
+## 7. ¿El `trace_id` en los logs es automático?
+
+**Automático, pero solo si el log se emite dentro de un span activo en el contexto.** No se escanean funciones: el SDK lee el **span activo del contexto** (thread-local / async-local) en el instante en que se ejecuta el `log`.
+
+```python
+# log FUERA de cualquier span → sin trace_id
+logging.info("arrancando app")
+
+with tracer.start_as_current_span("procesar"):
+    # log DENTRO del span activo → trace_id inyectado solo
+    logging.info("procesando")
+```
+
+Con auto-instrumentación (FastAPI/agente), **todo lo que corre durante el request ya está dentro del span del request**, así que los logs de cualquier parte del handler llevan trace_id sin escribir nada. Solo necesitas el puente (camino B: `LoggingHandler`, o `opentelemetry-instrumentation-logging`).
+
+⚠️ En el **camino A (stdout + filelog) NO hay nada automático**: el collector lee el JSON de Docker tal cual; ahí el `trace_id` lo pones tú en el mensaje.
+
+## 8. ¿Un span cubre solo la función envuelta o todas las que se ejecutan?
+
+Un span cubre **todo lo que se ejecuta dentro de su bloque**, aunque no lo envuelvas:
+
+- Envuelves `func_a` → el span dura lo que tarde `func_a`, **incluyendo** `func_b` y `func_c` que llame. Su tiempo queda dentro del span.
+- `func_b` / `func_c` **no** crean spans propios por sí solas. Solo aparece un span hijo automático cuando alguna hace una operación instrumentada (llamada HTTP saliente, query, RPC gRPC).
+- Los **logs** de `func_b` o `func_c` (invocadas desde `func_a`) sí llevan el trace_id, porque siguen dentro del contexto del span activo.
+
+No necesitas envolver cada función: envuelves la operación y todo lo que ejecuta queda bajo su manto.
+
+---
+
+## 9. Microservicios y propagación del contexto
 
 ### ¿Cómo se enlazan los traces entre servicios?
 
@@ -228,9 +312,145 @@ Si ambos lados están instrumentados con OTel, esto es **automático**: el span 
 
 Regla: **span del cliente = parent del span del servidor**. El span del servidor siempre es hijo del span del cliente que lo invocó.
 
+### ¿Dónde están las librerías? (SDK vs instrumentación)
+
+El SDK y las instrumentaciones viven en **repos distintos**. Por eso la de FastAPI no aparece en la página principal de OTel:
+
+| Lenguaje | Repo del SDK | Repo de instrumentaciones |
+|---|---|---|
+| Python | `open-telemetry/opentelemetry-python` | `open-telemetry/opentelemetry-python-contrib` (carpeta `instrumentation/`) |
+| Go | `open-telemetry/opentelemetry-go` | `open-telemetry/opentelemetry-go-contrib` |
+| Java | `open-telemetry/opentelemetry-java` | `open-telemetry/opentelemetry-java-instrumentation` |
+
+| Mecanismo | Quién lo hace |
+|---|---|
+| Crear spans, `TracerProvider`, exporters, propagadores, `LoggingHandler` | **SDK estándar** |
+| *Cuándo* crear un span (HTTP entrante, llamada gRPC, send/consume de Kafka) | **Instrumentación** |
+| *Cuándo* llamar a `inject` / `extract` (mandar / recibir el contexto) | **Instrumentación** |
+
+Regla: el SDK tiene el **mecanismo** (propagadores, contexto, modelo de datos); la instrumentación tiene los **ganchos** que deciden cuándo ejecutarlo. El `trace_id` en logs lo inyecta el SDK (el `LoggingHandler`), pero solo porque la instrumentación deja el span *activo* durante el request.
+
+### Con y sin instrumentación (gRPC y Kafka)
+
+**Regla de oro: el `with tracer.start_as_current_span(...)` NO propaga nada por sí solo.** La inyección la hace la instrumentación (interceptores gRPC, wrapper de `produce`, headers de Kafka). Tu `with` solo define el span que se vuelve *padre*. Sin instrumentación, haces `inject` al salir y `extract` al entrar.
+
+#### gRPC — cliente
+
+Con instrumentación (`opentelemetry-instrumentation-grpc`), el interceptor inyecta en los metadata solo:
+
+```python
+from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
+GrpcInstrumentorClient().instrument()
+
+stub = pedidos_pb2_grpc.PedidosStub(grpc.insecure_channel("servicio-b:50051"))
+with tracer.start_as_current_span("enviar-pedido", kind=trace.SpanKind.CLIENT):
+    resp = stub.Crear(pedidos_pb2.Request())   # el traceparent viaja solo
+```
+
+Sin instrumentación, inyectas el contexto en los metadata a mano:
+
+```python
+stub = pedidos_pb2_grpc.PedidosStub(grpc.insecure_channel("servicio-b:50051"))
+
+with tracer.start_as_current_span("enviar-pedido", kind=trace.SpanKind.CLIENT):
+    md = []
+    propagate.inject(md, setter=lambda c, k, v: c.append((k, v)))  # [('traceparent','00-…')]
+    resp = stub.Crear(pedidos_pb2.Request(), metadata=md)
+```
+
+#### gRPC — servidor
+
+Con instrumentación (`GrpcInstrumentorServer`), el interceptor extrae, crea el span SERVER hijo del cliente y lo deja activo:
+
+```python
+from opentelemetry.instrumentation.grpc import GrpcInstrumentorServer
+GrpcInstrumentorServer().instrument()
+
+class PedidosServicer(pedidos_pb2_grpc.PedidosServicer):
+    def Crear(self, request, context):
+        logging.info("creando pedido")   # ya lleva el trace_id del cliente
+        return pedidos_pb2.Respuesta(ok=True)
+```
+
+Sin instrumentación, extraes de los metadata y creas el span tú:
+
+```python
+def span_server(method):
+    def wrapper(self, request, context):
+        ctx = propagate.extract(dict(context.invocation_metadata()))
+        with tracer.start_as_current_span(
+            "Crear", context=ctx, kind=trace.SpanKind.SERVER
+        ):
+            return method(self, request, context)
+    return wrapper
+
+class PedidosServicer(pedidos_pb2_grpc.PedidosServicer):
+    @span_server
+    def Crear(self, request, context):
+        logging.info("creando pedido")
+        return pedidos_pb2.Respuesta(ok=True)
+```
+
+#### Kafka — productor
+
+Con instrumentación (`opentelemetry-instrumentation-confluent-kafka`), envuelve `produce`, crea el span PRODUCER e inyecta `traceparent` en los **headers del mensaje**:
+
+```python
+from opentelemetry.instrumentation.confluent_kafka import ConfluentKafkaInstrumentor
+ConfluentKafkaInstrumentor().instrument()
+
+producer = Producer({"bootstrap.servers": "kafka:9092"})
+with tracer.start_as_current_span("enviar-pedido", kind=trace.SpanKind.PRODUCER):
+    producer.produce("pedidos", value=b"data")   # headers con traceparent agregados solos
+```
+
+Sin instrumentación, inyectas en los headers manualmente antes de `produce`:
+
+```python
+producer = Producer({"bootstrap.servers": "kafka:9092"})
+
+with tracer.start_as_current_span("enviar-pedido", kind=trace.SpanKind.PRODUCER):
+    headers = []
+    propagate.inject(headers, setter=lambda c, k, v: c.append((k, v)))
+    producer.produce("pedidos", value=b"data", headers=headers)
+```
+
+#### Kafka — consumidor
+
+Con instrumentación, al hacer `poll()` extrae de `msg.headers()`, crea el span de consumo (enlazado al productor vía *links*, por ser asíncrono) y lo deja activo mientras procesas:
+
+```python
+from opentelemetry.instrumentation.confluent_kafka import ConfluentKafkaInstrumentor
+ConfluentKafkaInstrumentor().instrument()
+
+consumer = Consumer({...})
+while True:
+    msg = consumer.poll(1.0)
+    if msg:
+        with tracer.start_as_current_span("procesar-pedido"):  # hijo del span de consume
+            logging.info("procesando")                          # lleva el trace_id del mensaje
+```
+
+Sin instrumentación, extraes tú del header del mensaje (hay que decodificar bytes) y creas el span con ese contexto:
+
+```python
+def _headers_dict(headers):
+    return {k: (v.decode() if isinstance(v, bytes) else v) for k, v in headers or []}
+
+consumer = Consumer({...})
+while True:
+    msg = consumer.poll(1.0)
+    if msg:
+        ctx = propagate.extract(_headers_dict(msg.headers()))
+        with tracer.start_as_current_span(
+            "procesar-pedido", context=ctx, kind=trace.SpanKind.CONSUMER
+        ):
+            logging.info("procesando")
+```
+
 ---
 
-## 7. Monolito: ¿automático o manual?
+## 10. Monolito: ¿automático o manual?
 
 Híbrido, con la base **automática**:
 
@@ -242,7 +462,7 @@ En un monolito no hay propagación entre procesos, así que la traza nunca se "r
 
 ---
 
-## 8. Ver el trace desde el frontend
+## 11. Ver el trace desde el frontend
 
 El navegador no consulta Tempo directamente. Dos caminos:
 
@@ -264,3 +484,8 @@ El navegador no consulta Tempo directamente. Dos caminos:
 - Entre **microservicios** el contexto viaja en `traceparent` (HTTP) o en los metadata de **gRPC**; automático solo si ambos lados están instrumentados.
 - **Monolito**: entrada automática, negocio manual.
 - Desde el **frontend**: devuelve `X-Trace-Id` y enlaza a Grafana, o instrumenta el browser.
+- **Configuración mínima** por app: 2 env vars (`OTEL_SERVICE_NAME` + `OTEL_EXPORTER_OTLP_ENDPOINT`); el endpoint es uno solo para las 3 señales.
+- El `trace_id` en logs es **automático solo dentro de un span activo** (camino B); en el camino A lo pones tú.
+- Un span cubre **todo lo que se ejecuta dentro de su bloque**, no solo la función envuelta.
+- El `with` **no propaga**: la inyección la hace la instrumentación (interceptores gRPC, headers de Kafka); sin ella, `inject`/`extract` manual al salir/entrar.
+- Las instrumentaciones viven en un repo aparte del SDK: `opentelemetry-python-contrib` (Python), `opentelemetry-go-contrib` (Go), `opentelemetry-java-instrumentation` (Java).
