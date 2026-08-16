@@ -1,0 +1,13 @@
+grafana:
+  adminPassword: admin
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc:3100
+      editable: true
+    - name: Tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.monitoring.svc:3200
+      editable: true

@@ -85,6 +85,66 @@ Tu propuesta es casi correcta, con dos matices importantes:
   - Secrets de configuración, variables de entorno, cadenas de conexión.
 
 
+## Kubernetes (kube-prometheus-stack)
+
+Misma pila pero desplegada en un cluster con Helm. Guía de instalación completa y configs: [`kubernetes/README.md`](kubernetes/README.md).
+
+### Componentes: Docker Compose vs Kubernetes
+
+| Componente | Docker Compose | Kubernetes (`kube-prometheus-stack`) |
+|------------|----------------|--------------------------------------|
+| Prometheus | ✅ manual | ✅ incluido |
+| Grafana | ✅ manual | ✅ incluido |
+| node-exporter | ✅ manual | ✅ incluido (subchart) |
+| cAdvisor | ✅ manual | ❌ no hace falta — el **kubelet** ya lo expone (`/metrics/cadvisor`) |
+| kube-state-metrics | ❌ no existe | ➕ incluido |
+| Prometheus Operator | ❌ | ➕ incluido (gestiona ServiceMonitor/PodMonitor vía CRDs) |
+| Alertmanager | ❌ | ➕ incluido |
+| OTel Collector | ✅ | ➕ instalar aparte (chart `open-telemetry/opentelemetry-collector`) |
+| Loki | ✅ | ➕ instalar aparte (chart `grafana/loki`, ingesta OTLP) |
+| Tempo | ✅ | ➕ instalar aparte (chart `grafana/tempo`) |
+
+### Arquitectura en Kubernetes
+
+```mermaid
+flowchart LR
+    subgraph apps["TUS APLICACIONES"]
+        app["App (pod)"]
+    end
+
+    subgraph kps["kube-prometheus-stack (Helm)"]
+        operator["Prometheus Operator"]
+        prom["Prometheus"]
+        alertm["Alertmanager"]
+        grafana["Grafana"]
+        nse["node-exporter"]
+        ksm["kube-state-metrics"]
+    end
+
+    kubelet["kubelet (expone cAdvisor)"]
+
+    subgraph extra["Instalados aparte (Helm)"]
+        oc["otel-collector<br/>(daemonset)"]
+        loki["Loki"]
+        tempo["Tempo"]
+    end
+
+    app -->|"OTLP trazas + logs"| oc
+    oc -->|"OTLP"| tempo
+    oc -->|"OTLP"| loki
+
+    operator -->|"CRDs"| prom
+    prom -->|"scrape (ServiceMonitor)"| app
+    prom -->|"scrape /metrics/cadvisor"| kubelet
+    prom -->|"scrape"| nse
+    prom -->|"scrape"| ksm
+    prom -->|"alertas"| alertm
+
+    grafana -->|"query"| prom
+    grafana -->|"query"| loki
+    grafana -->|"query"| tempo
+```
+
 ## Requisitos
 
 - Docker + Compose V2 (plugin `docker compose`)
