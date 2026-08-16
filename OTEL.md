@@ -476,6 +476,92 @@ El navegador no consulta Tempo directamente. Dos caminos:
 
 ---
 
+## 12. Ejemplo de trace: frontend → STT → LangGraph → TTS
+
+Operación: el frontend graba del micrófono, detecta voz (VAD), envía bytes al backend; este transcribe con STT (gRPC), genera respuesta con LangGraph (astream), acumula el texto hasta el primer `.`, y lo manda al TTS (gRPC) — posiblemente **varias llamadas** por petición — que devuelve los bytes de audio al frontend.
+
+### Vista 1 — Flujo con el contexto propagándose
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as Frontend
+    participant B as Backend
+    participant S as STT (gRPC)
+    participant LG as LangGraph
+    participant T as TTS (gRPC)
+
+    Note over F: frontend.audio-request (span raíz)
+    F->>F: vad.detect (¿es voz humana?)
+    F->>F: audio.to-bytes
+    F->>B: POST /audio (bytes) + traceparent
+    Note over B: backend.audio (SERVER, hijo del span del frontend)
+    B->>S: stt.transcribe (CLIENT, gRPC)
+    S-->>B: texto
+    B->>LG: langgraph.run (astream)
+    loop astream: acumular chunks en el array
+        LG-->>B: chunk de texto
+        Note over B: text.accumulate (hasta encontrar ".")
+    end
+    loop Por cada segmento "." → TTS (pueden ser varias llamadas)
+        B->>T: tts.synthesize #i (CLIENT, gRPC)
+        T-->>B: bytes de audio
+    end
+    B-->>F: respuesta (bytes) + X-Trace-Id
+```
+
+### Vista 2 — Árbol de spans (el trace en Tempo/Grafana)
+
+```mermaid
+flowchart TB
+    subgraph FRONTEND
+        root["frontend.audio-request<br/>(span raíz)"]
+        vad["vad.detect"]
+        bytes["audio.to-bytes"]
+        http["http.client.send<br/>(CLIENT)"]
+        root --> vad --> bytes --> http
+    end
+    subgraph BACKEND
+        srv["backend.audio<br/>(SERVER)"]
+        stt_c["stt.transcribe<br/>(CLIENT, gRPC)"]
+        lg["langgraph.run<br/>(astream)"]
+        acc["text.accumulate"]
+        t1["tts.synthesize #1<br/>(CLIENT, gRPC)"]
+        t2["tts.synthesize #2<br/>(CLIENT, gRPC)"]
+        tn["tts.synthesize #N<br/>(CLIENT, gRPC)"]
+        srv --> stt_c
+        srv --> lg
+        srv --> acc
+        acc --> t1
+        acc --> t2
+        acc --> tn
+    end
+    subgraph STT
+        stt_s["stt.transcribe<br/>(SERVER, gRPC)"]
+    end
+    subgraph LANGGRAPH
+        lg_s["nodos del grafo<br/>(subspans)"]
+    end
+    subgraph TTS
+        tts1["tts.synthesize #1<br/>(SERVER, gRPC)"]
+        tts2["tts.synthesize #2<br/>(SERVER, gRPC)"]
+    end
+    http -- "traceparent" --> srv
+    stt_c -- "metadata gRPC" --> stt_s
+    lg -- "stream" --> lg_s
+    t1 -- "metadata gRPC" --> tts1
+    t2 -- "metadata gRPC" --> tts2
+```
+
+### Reglas que muestra el ejemplo
+
+- **Un solo trace** de punta a punta (`trace_id` único): el frontend es el **span raíz**; todo lo demás cuelga de él.
+- Cada **cruce de servicio** es un par CLIENT → SERVER unido por propagación: `traceparent` en HTTP, metadata en gRPC, headers en streaming.
+- Las **llamadas al TTS son spans hermanos** (varias bajo `text.accumulate`), cada una con su par CLIENT → SERVER en el servicio TTS.
+- `text.accumulate` agrupa el bucle de acumulación; los chunks del astream no crean spans individuales salvo que tú los agregues (`tracer.start_as_current_span` por chunk si te interesa medirlos).
+
+---
+
 ## Resumen rápido
 
 - Los **logs** llevan `trace_id`/`span_id` para correlacionar con su traza; las **métricas** no vienen de los logs, se *derivan* de ellos o de las trazas.
