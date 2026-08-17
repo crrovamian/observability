@@ -22,6 +22,8 @@ receivers:
     storage: file_storage
     include:
       - /var/lib/docker/containers/*/*-json.log
+    exclude:
+      - /var/lib/docker/containers/*otel-collector*/*-json.log
     start_at: beginning
     include_file_path: true
     operators:
