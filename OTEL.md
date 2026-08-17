@@ -227,6 +227,79 @@ A diferencia de traces, en métricas el rol de cada parte es menos obvio. Regla:
 2. **App con SDK Prometheus** (`prom-client`): métricas de tu app que tú defines — no usa OTel para métricas.
 3. **App con SDK OTel** (`MeterProvider` + `OTLPMetricExporter`): métricas exportadas por OTLP al collector → Prometheus. Esto requiere un pipeline de métricas en el collector (actualmente no lo tienes configurado).
 
+### Referencia rápida de métodos (traces y metrics)
+
+#### Trazas — API principal
+
+| Método | Qué hace | Ejemplo |
+|---|---|---|
+| `trace.get_tracer(name)` | Obtiene un tracer (una sola instancia, reutilizable) | `tracer = trace.get_tracer("mi-servicio")` |
+| `tracer.start_as_current_span(name)` | Crea span + lo setea como activo en el contexto (context manager) | `with tracer.start_as_current_span("x") as span:` |
+| `tracer.start_span(name)` | Crea span **sin** setearlo como activo (tú manejas el contexto) | `span = tracer.start_span("x")` |
+| `span.set_attribute(key, value)` | Agrega un atributo key/value al span | `span.set_attribute("http.method", "GET")` |
+| `span.set_status(code, description)` | Marca el span como OK o ERROR | `span.set_status(trace.StatusCode.ERROR, "timeout")` |
+| `span.add_event(name, attributes)` | Agrega un evento puntual al span (no afecta duración) | `span.add_event("retry", {"attempt": 2})` |
+| `span.record_exception(exception)` | Registra una excepción como evento con stack trace | `span.record_exception(e)` |
+| `span.end()` | Cierra el span (calcula duración). **Obligatorio** si usas `start_span` | `span.end()` |
+| `span.is_recording()` | Indica si el span está grabando (útil para evitar trabajo innecesario) | `if span.is_recording(): span.set_attribute(...)` |
+| `span.get_span_context()` | Obtiene el contexto del span (trace_id, span_id) | `ctx = span.get_span_context()` |
+
+#### Trazas — Propagación (contexto entre servicios)
+
+| Método | Qué hace | Ejemplo |
+|---|---|---|
+| `propagation.inject(carrier, setter)` | Inyecta el contexto activo (traceparent) en un carrier (headers, metadata) | `propagation.inject(headers, setter=lambda c,k,v: c.append((k,v)))` |
+| `propagation.extract(carrier, getter)` | Extrae el contexto de un carrier (para crear el span padre) | `ctx = propagation.extract(dict(metadata))` |
+| `trace.set_span_in_context(span)` | Setea un span como activo en el contexto (para pasar ctx a `start_as_current_span`) | `ctx = trace.set_span_in_context(span)` |
+
+#### Métricas — API principal
+
+| Método | Qué hace | Ejemplo |
+|---|---|---|
+| `trace.get_meter(name)` | Obtiene un meter (una sola instancia, reutilizable) | `meter = trace.get_meter("mi-servicio")` |
+| `meter.create_counter(name)` | Crea un **counter** (solo sube, para conteos acumulativos) | `counter = meter.create_counter("pedidos.total")` |
+| `meter.create_up_down_counter(name)` | Crea un **up-down counter** (sube y baja) | `udc = meter.create_up_down_counter("workers.active")` |
+| `meter.create_histogram(name)` | Crea un **histogram** (distribuciones: latencia, tamaño) | `hist = meter.create_histogram("request.duration")` |
+| `meter.create_gauge(name)` | Crea un **gauge** (valor puntual: CPU, memoria) | `gauge = meter.create_gauge("queue.length")` |
+
+#### Métricas — Registro de valores
+
+| Método | Qué hace | Ejemplo |
+|---|---|---|
+| `counter.add(value, attributes)` | Incrementa el counter | `counter.add(1, {"method": "GET", "status": 200})` |
+| `up_down_counter.add(value, attributes)` | Incrementa o decrementa | `udc.add(-1, {"worker": "A"})` |
+| `histogram.record(value, attributes)` | Registra un valor en la distribución | `hist.record(0.245, {"endpoint": "/users"})` |
+| `gauge.set(value, attributes)` | Establece el valor actual del gauge | `gauge.set(42, {"queue": "orders"})` |
+
+#### Métricas — Ejemplo completo
+
+```python
+from opentelemetry import trace
+
+meter = trace.get_meter("backend-audio")
+
+# Definir las métricas (una sola vez, a nivel de módulo)
+pedidos_counter = meter.create_counter(
+    "pedidos.total",
+    description="Total de pedidos procesados",
+    unit="1",
+)
+duracion_histogram = meter.create_histogram(
+    "pedido.duration",
+    description="Duración del procesamiento de pedidos",
+    unit="ms",
+)
+
+async def procesar_pedido(pedido_id: str):
+    start = time.time()
+
+    # ... lógica ...
+
+    duracion_ms = (time.time() - start) * 1000
+    pedidos_counter.add(1, {"status": "ok"})
+    duracion_histogram.record(duracion_ms, {"endpoint": "/pedidos"})
+```
+
 ---
 
 ## 6. Configuración en números
@@ -472,6 +545,222 @@ while True:
         ):
             logging.info("procesando")
 ```
+
+### Cómo sabe el tracer quién es el padre (contexto implícito)
+
+**No se lo pasas tú. El tracer lo lee del contexto implícito (`contextvars` en Python).**
+
+En Python, cada `tracer.start_as_current_span("nombre")` hace **dos cosas**:
+1. Crea el span nuevo
+2. Lo **adjunta al contexto activo** de la corrutina/hilo actual
+
+Cuando ejecutas otro `start_as_current_span` **dentro** de ese bloque, el tracer lee el contexto → encuentra el span que está activo → y lo usa como **padre** automáticamente.
+
+#### Cómo funciona por request en FastAPI
+
+**FastAPI async (`async def`)** — cada request crea un **`asyncio.Task`** nuevo. En Python, cada `asyncio.Task` tiene **su propio `contextvars.Context`** (copia aislada). Request A y B corren en el mismo hilo (event loop) pero con contextos separados:
+
+```
+Hilo único (event loop)
+├── Task del request A → context_A → span activo: "GET /users"
+├── Task del request B → context_B → span activo: "POST /orders"
+└── Task del request C → context_C → span activo: "GET /items"
+```
+
+**FastAPI sync (`def`)** — FastAPI ejecuta cada request en un **thread pool**. Cada hilo tiene también su propio `contextvars.Context`:
+
+```
+Thread pool
+├── Hilo 1 → context_A → span activo: "GET /users"
+├── Hilo 2 → context_B → span activo: "POST /orders"
+└── Hilo 3 → context_C → span activo: "GET /items"
+```
+
+**Resultado: cada request tiene su contexto aislado**, sin importar async/sync. El tracer no necesita "saber" a qué request pertenece — el contexto ya está separado.
+
+#### Qué hace `start_as_current_span` (paso a paso)
+
+```python
+with tracer.start_as_current_span("service.get_user") as span:
+    # Paso 1: lee el contexto actual → encuentra el span activo (el del controller)
+    # Paso 2: crea un nuevo span con ese padre (parent_span_id = span del controller)
+    # Paso 3: setea ESTE span como el nuevo activo en el contexto
+    # Paso 4: ejecuta el bloque (repository.py lee el contexto y encuentra ESTE span)
+    # Paso 5: al salir del bloque, RESTAURA el span anterior como activo
+    pass
+```
+
+Cada `start_as_current_span` es como una **pila (stack)**: push del nuevo span al contexto → ejecutar → pop al salir. El siguiente `start_as_current_span` siempre lee el tope de la pila.
+
+#### `start_as_current_span` vs `start_span`
+
+| Método | Crea span | Lo pone como activo | El siguiente hijo lo hereda |
+|---|:---:|:---:|:---:|
+| `tracer.start_as_current_span("x")` | ✅ | ✅ | ✅ |
+| `tracer.start_span("x")` | ✅ | ❌ | ❌ (sigue viendo al padre anterior) |
+
+Si usas `start_span` a mano, tendrías que hacer tú la propagación:
+
+```python
+span = tracer.start_span("x")
+ctx = trace.set_span_in_context(span)
+# y luego pasar ctx explícitamente al siguiente start_as_current_span
+```
+
+### Tracing manual de DB (sin instrumentación)
+
+Si no usas una instrumentación de DB (como `opentelemetry-instrumentation-sqlalchemy`), envuelves cada query con un span manual usando los atributos de semconv. Ejemplo completo en 3 capas:
+
+**controller.py** — el handler HTTP, span raíz:
+
+```python
+from fastapi import FastAPI
+from opentelemetry import trace
+from service import UserService
+
+tracer = trace.get_tracer("backend-audio")
+app = FastAPI()
+service = UserService()
+
+
+@app.get("/users/{user_id}")
+async def get_user(user_id: int):
+    # start_as_current_span hace 2 cosas:
+    #   1. Crea un span nuevo con trace_id (generado aquí si es el primero,
+    #      o heredado de un header traceparent entrante)
+    #   2. Lo SETEA como el span ACTIVO en el contexto de ESTE request
+    #
+    # Como es el primer span de esta request, no tiene padre → es el SPAN RAÍZ
+    #
+    # En Python, "el contexto de este request" es un asyncio.Task,
+    # y cada request tiene el suyo aislado via contextvars
+    with tracer.start_as_current_span("GET /users/{user_id}") as span:
+        span.set_attribute("http.method", "GET")
+        span.set_attribute("http.url", f"/users/{user_id}")
+
+        # service.get_user corre DENTRO de este bloque
+        # El contexto todavía tiene ESTE span como activo
+        # Cuando service.get_user llame start_as_current_span,
+        # el tracer leerá el contexto → encontrará ESTE span → lo usará como padre
+        result = await service.get_user(user_id)
+        return result
+```
+
+**service.py** — la capa de servicio, span hijo del controller:
+
+```python
+from opentelemetry import trace
+from repository import UserRepository
+
+tracer = trace.get_tracer("backend-audio")
+
+
+class UserService:
+    def __init__(self):
+        self.repo = UserRepository()
+
+    async def get_user(self, user_id: int):
+        # El tracer lee el contexto actual → encuentra "GET /users/{user_id}" (del controller)
+        # Crea este span como HIJO de ese span
+        # Luego lo setea como activo → el contexto ahora apunta a ESTE span
+        with tracer.start_as_current_span("service.get_user") as span:
+            span.set_attribute("user.id", user_id)
+
+            # repository.find_user corre DENTRO de este bloque
+            # El contexto ahora tiene "service.get_user" como activo
+            # Así que el span del repository será hijo de ESTE
+            user = await self.repo.find_user(user_id)
+
+            if not user:
+                span.set_status(trace.StatusCode.ERROR, "user not found")
+            return user
+        # Al salir del bloque, el contexto RESTAURA "GET /users/{user_id}" como activo
+```
+
+**repository.py** — el acceso a DB, span hijo del service, con semconv:
+
+```python
+from opentelemetry import trace
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+tracer = trace.get_tracer("backend-audio")
+
+
+class UserRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def find_user(self, user_id: int):
+        # El tracer lee el contexto → encuentra "service.get_user" como activo
+        # Crea este span como hijo de "service.get_user"
+        #
+        # Los atributos de DB (semconv) se pasan al crear el span:
+        # - db.system.name: Required (postgresql, mysql, etc.)
+        # - db.query.text: Recommended (la query parametrizada, sin valores sensibles)
+        # - db.operation.name: Condicional (SELECT, INSERT, etc.)
+        # - server.address/port: Recommended
+        with tracer.start_as_current_span(
+            "SELECT users",
+            attributes={
+                "db.system.name": "postgresql",
+                "db.namespace": "mi_db",
+                "db.operation.name": "SELECT",
+                "db.query.text": "SELECT * FROM users WHERE id = :id",
+                "server.address": "db-host",
+                "server.port": 5432,
+            },
+        ) as span:
+            try:
+                result = await self.session.execute(
+                    text("SELECT * FROM users WHERE id = :id"), {"id": user_id}
+                )
+                row = result.mappings().first()
+                span.set_attribute("db.response.returned_rows", 1 if row else 0)
+                return dict(row) if row else None
+            except Exception as e:
+                span.set_status(trace.StatusCode.ERROR, str(e))
+                raise
+        # Al salir, restaura "service.get_user" como activo
+```
+
+**Árbol de spans que genera:**
+
+```
+GET /users/123                          ← controller.py (ROOT, sin padre)
+├── http.method = GET
+├── http.url = /users/123
+└── service.get_user                    ← service.py (hijo del controller)
+    ├── user.id = 123
+    └── SELECT users                    ← repository.py (hijo del service)
+        ├── db.system.name = postgresql
+        ├── db.query.text = SELECT * FROM users WHERE id = :id
+        └── db.response.returned_rows = 1
+```
+
+**Qué pierdes sin instrumentación de DB:**
+
+| Con instrumentación | Sin instrumentación (manual) |
+|---|---|
+| Span automático por cada query | Tienes que envolver cada query manualmente |
+| Métricas: `db.client.connections.usage`, `db.statement.duration` | Sin métricas de DB |
+| Captura automática del connection pool | Sin visibility del pool |
+| Parseo automático del SQL para atributos | Tú pones los atributos a mano |
+| Manejo de errores automático (status ERROR) | Tienes que catchear y setear status |
+
+**Atributos de semconv para DB (actualizados):**
+
+| Atributo | Requisito | Valor ejemplo |
+|---|---|---|
+| `db.system.name` | **Required** | `postgresql`, `mysql`, `sqlite` |
+| `db.namespace` | Condicional | `mi_db` |
+| `db.operation.name` | Condicional | `SELECT`, `INSERT`, `UPDATE` |
+| `db.query.text` | Recommended | `SELECT * FROM users WHERE id = $1` |
+| `db.query.summary` | Recommended | `SELECT users` (baja cardinalidad) |
+| `server.address` + `server.port` | Recommended | `db-host:5432` |
+| `db.response.returned_rows` | Opt-in | `1` |
+
+> Nota: `db.statement` y `db.system` están **deprecated**; usar `db.query.text` y `db.system.name`.
 
 ---
 
@@ -830,3 +1119,4 @@ async function enviarAudioManual(audioBytes: ArrayBuffer) {
 - Las instrumentaciones viven en un repo aparte del SDK: `opentelemetry-python-contrib` (Python), `opentelemetry-go-contrib` (Go), `opentelemetry-java-instrumentation` (Java).
 - **Frontend (browser)**: solo HTTP/JSON (`:4318`), sin gRPC ni metrics SDK; CORS obligatorio en el collector; `FetchInstrumentation` propaga el `traceparent` a las APIs del backend automáticamente.
 - **Métricas**: las métricas de framework/librería (HTTP, gRPC, DB) las crea la **instrumentación** automáticamente; las de negocio las crea **el SDK** con código manual; las de runtime las crea el agente (Java) o las librerías de runtime (Node/Go).
+- El **contexto implícito** (`contextvars` en Python) es lo que hace que `start_as_current_span` herede el padre automáticamente: cada request tiene su propio contexto aislado (asyncio.Task o thread), el tracer lee el contexto, y el siguiente span hijo se crea sin pasar nada a mano.
