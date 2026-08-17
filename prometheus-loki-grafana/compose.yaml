@@ -1,14 +1,4 @@
 services:
-  # ==================== TUS APLICACIONES ====================
-  nginx-demo:
-    image: nginx:alpine
-    container_name: nginx-demo
-    ports:
-      - "80:80"
-    networks:
-      - monitoring
-    restart: unless-stopped
-
   # ==================== MÉTRICAS ====================
   prometheus:
     image: prom/prometheus:latest
