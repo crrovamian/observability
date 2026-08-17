@@ -10,6 +10,13 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:5173"   # frontend en dev (Vite)
+            - "http://localhost:3000"   # frontend en dev (CRA/Next.js)
+          allowed_headers:
+            - "Content-Type"
+          max_age: 7200
 
   filelog/docker:
     storage: file_storage

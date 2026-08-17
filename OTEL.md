@@ -202,6 +202,31 @@ Son librerías/agentes que **observan los frameworks sin que toques tu código**
 
 "Lo que es propio de OTel con el lenguaje" = el **SDK** (API + export). "Instrumentación" = lo que **observa tus librerías**. Con el SDK puedes producir telemetría manual; con la instrumentación obtienes la telemetría "gratis" de tus frameworks.
 
+### Métricas: qué genera el SDK y qué genera la instrumentación
+
+A diferencia de traces, en métricas el rol de cada parte es menos obvio. Regla: **el SDK te da la API para crear métricas; la instrumentación crea las métricas de las librerías que observa**.
+
+| Qué genera | Origen | Ejemplos de métricas |
+|---|---|---|
+| **Métricas de negocio** | Solo SDK (tú las creas) | `pedidos_creados_total`, `cola_fallos_total`, `latencia_proceso_p75` |
+| **Métricas de framework/librería** | Instrumentación | `http.server.duration`, `http.server.active_requests`, `rpc.client.duration`, `db.statement.duration`, `messaging.kafka.producer.record.count` |
+| **Métricas de runtime** | SDK auto / agente | JVM (`jvm.gc.pause`), Node (event loop lag), Go (goroutines), HTTP connections |
+
+**Cómo funciona en la práctica por lenguaje:**
+
+- **Java (agente)**: el agente ya incluye las métricas de runtime (JVM, GC, classloading) + las métricas de las librerías que instrumenta (HTTP, gRPC, DB, Kafka). Todo sale por OTLP al collector, sin tocar nada. Lo que es "SDK" aquí: las métricas de JVM las crea el agente usando el SDK internamente.
+
+- **Python**: `opentelemetry-instrumentation-fastapi` crea tanto traces como `http.server.duration`, `http.server.active_requests`, etc. Lo que es "SDK": `meter.create_counter("pedidos")` para métricas tuyas.
+
+- **Node**: igual que Python — las instrumentaciones crean métricas HTTP/gRPC/DB. Lo que es "SDK": `meter.createHistogram(...)` para métricas de negocio.
+
+- **Go**: no hay agente; las instrumentaciones de librería crean métricas de esas librerías. Lo que es "SDK": `meter.Int64Counter(...)` manual.
+
+**En tu stack actual**: Prometheus hace *scrape* directo a `/metrics`. Las métricas que llegan son de:
+1. **cAdvisor / node-exporter**: métricas de infra (CPU, memoria, disco) — sin OTel.
+2. **App con SDK Prometheus** (`prom-client`): métricas de tu app que tú defines — no usa OTel para métricas.
+3. **App con SDK OTel** (`MeterProvider` + `OTLPMetricExporter`): métricas exportadas por OTLP al collector → Prometheus. Esto requiere un pipeline de métricas en el collector (actualmente no lo tienes configurado).
+
 ---
 
 ## 6. Configuración en números
@@ -562,6 +587,234 @@ flowchart TB
 
 ---
 
+## 13. Instrumentación del frontend (browser) con OTel
+
+### Limitaciones del browser vs backend
+
+| Aspecto | Browser | Backend |
+|---|---|---|
+| Exportar traces | Solo HTTP/JSON (`:4318/v1/traces`) | gRPC o HTTP |
+| Metrics | ❌ SDK de métricas no soportado en browser | ✅ |
+| Logs OTLP | ❌ | ✅ |
+| Bundle size | ~50-80KB gzipped | — |
+| Seguridad | CORS + CSP | — |
+
+El browser **no puede usar gRPC**: el exporter siempre es HTTP/JSON al puerto `:4318`. El SDK de métricas no tiene soporte completo en browser; solo se exportan traces desde el frontend.
+
+### Paquetes necesarios
+
+```bash
+npm install \
+  @opentelemetry/api \
+  @opentelemetry/sdk-trace-web \
+  @opentelemetry/sdk-trace-base \
+  @opentelemetry/exporter-trace-otlp-http \
+  @opentelemetry/context-zone \
+  @opentelemetry/resources \
+  @opentelemetry/semantic-conventions \
+  @opentelemetry/instrumentation \
+  @opentelemetry/instrumentation-document-load \
+  @opentelemetry/instrumentation-fetch \
+  @opentelemetry/instrumentation-xml-http-request
+```
+
+Alternativa más simple: el paquete `@opentelemetry/auto-instrumentations-web` agrega todas las instrumentaciones de arriba en una sola línea.
+
+### Código: archivo `otel.ts`
+
+Crear un archivo de inicialización que se importe **antes** del bootstrap de la app:
+
+```ts
+// src/otel.ts — importar ANTES de React/Vue/app
+import { WebTracerProvider } from '@opentelemetry/sdk-trace-web';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+import { ZoneContextManager } from '@opentelemetry/context-zone';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { DocumentLoadInstrumentation } from '@opentelemetry/instrumentation-document-load';
+import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch';
+import { XMLHttpRequestInstrumentation } from '@opentelemetry/instrumentation-xml-http-request';
+
+// Endpoint del collector — solo HTTP, nunca gRPC
+const OTEL_ENDPOINT = import.meta.env.VITE_OTEL_ENDPOINT ?? 'http://localhost:4318';
+
+const exporter = new OTLPTraceExporter({
+  url: `${OTEL_ENDPOINT}/v1/traces`,
+  headers: {},  // fuerza XHR en vez de sendBeacon (mejor soporte CORS)
+});
+
+const provider = new WebTracerProvider({
+  resource: resourceFromAttributes({
+    [ATTR_SERVICE_NAME]: 'frontend-audio',
+  }),
+  spanProcessors: [
+    new BatchSpanProcessor(exporter, {
+      scheduledDelayMillis: 1000,
+      maxExportBatchSize: 512,
+    }),
+  ],
+});
+
+provider.register({
+  contextManager: new ZoneContextManager(),
+});
+
+// Instrumentaciones automáticas
+registerInstrumentations({
+  instrumentations: [
+    new DocumentLoadInstrumentation(),
+    new FetchInstrumentation({
+      propagateTraceHeaderCorsUrls: [
+        /localhost:8000/,   // tu backend
+        /api\.ejemplo\.com/,
+      ],
+      clearTimingResources: true,
+    }),
+    new XMLHttpRequestInstrumentation({
+      propagateTraceHeaderCorsUrls: [
+        /localhost:8000/,
+        /api\.ejemplo\.com/,
+      ],
+    }),
+  ],
+});
+```
+
+Importar en el punto de entrada de la app (antes del bootstrap):
+
+```ts
+// main.ts / main.tsx / index.ts
+import './otel.ts';   // ← primero, antes de todo
+import { createApp } from 'vue';  // o React, Angular, etc.
+```
+
+### Variables de entorno por bundler
+
+El browser no puede leer `process.env` en runtime. Hay que pasarlas en build time:
+
+| Bundler | Variable | Ejemplo |
+|---|---|---|
+| Vite | `VITE_OTEL_ENDPOINT` | `http://localhost:4318` |
+| Next.js | `NEXT_PUBLIC_OTEL_ENDPOINT` | `http://localhost:4318` |
+| CRA | `REACT_APP_OTEL_ENDPOINT` | `http://localhost:4318` |
+
+```env
+# .env (Vite)
+VITE_OTEL_ENDPOINT=http://localhost:4318
+```
+
+### Configuración del collector: CORS
+
+Agregar `cors` al receiver HTTP que ya existe en `otel-collector/config.yaml`:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:5173"   # frontend en dev (Vite)
+            - "http://localhost:3000"   # frontend en dev (CRA/Next.js)
+            - "https://app.ejemplo.com" # frontend en producción
+          allowed_headers:
+            - "Content-Type"
+          max_age: 7200
+```
+
+> El receiver HTTP ya acepta traces del backend vía OTLP; agregar CORS no afecta las llamadas internas del backend (esas son gRPC a `:4317` o HTTP sin Origin header).
+
+### Qué es automático vs manual en el frontend
+
+| Qué | ¿Automático? | ¿Manual? | Notas |
+|---|:---:|:---:|---|
+| Page load (TTFB, FCP, DOMContentLoaded) | ✅ | | `DocumentLoadInstrumentation` |
+| Fetch/XHR con `traceparent` inyectado | ✅ | | `FetchInstrumentation` / `XMLHttpRequestInstrumentation` |
+| Interacciones de usuario (click, etc.) | ✅ | | `UserInteractionInstrumentation` (opcional) |
+| Spans por audio (Web Audio API, MediaRecorder, VAD) | | ✅ | `tracer.start_as_current_span(...)` |
+| Propagación del trace al backend | ✅ | | `propagateTraceHeaderCorsUrls` inyecta el header |
+| Métricas de performance (Core Web Vitals) | | ⚠️ | métricas de browser limitadas, solo por spans o atributos |
+
+### Ejemplo completo con su caso de uso (audio → STT → LangGraph → TTS)
+
+El frontend genera el **span raíz** (`frontend.audio-request`). Las llamadas al backend son capturadas automáticamente por `FetchInstrumentation` y propagan el `traceparent`:
+
+```ts
+import { trace } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('frontend-audio');
+
+async function enviarAudio(audioBytes: ArrayBuffer) {
+  // Span manual: VAD + conversión (automático por document-load ya cubrió el page load)
+  const rootSpan = tracer.startSpan('frontend.audio-request');
+
+  // Span manual: VAD
+  const vadSpan = tracer.startSpan('vad.detect');
+  const esVoz = await detectarVoz(audioBytes);  // tu lógica VAD
+  vadSpan.end();
+
+  if (!esVoz) { rootSpan.end(); return; }
+
+  // Conversión a bytes
+  const bytesSpan = tracer.startSpan('audio.to-bytes');
+  const pcm = await convertirAPCM(audioBytes);
+  bytesSpan.end();
+
+  // Fetch al backend — FetchInstrumentation inyecta traceparent automáticamente
+  const resp = await fetch('http://localhost:8000/audio', {
+    method: 'POST',
+    body: pcm,
+  });
+
+  const { traceId } = await resp.json();
+  rootSpan.setAttribute('trace.backend_id', traceId);
+  rootSpan.end();
+}
+```
+
+Lo que se ve en Tempo:
+
+```
+frontend-audio-request          ← span raíz (generado por tu código)
+├── vad.detect                  ← manual
+├── audio.to-bytes              ← manual
+└── POST /audio                 ← automático (FetchInstrumentation)
+    └── backend.audio           ← SERVER, enlazado por traceparent
+        ├── stt.transcribe
+        ├── langgraph.run
+        ├── text.accumulate
+        ├── tts.synthesize #1
+        └── tts.synthesize #2
+```
+
+### Nota sobre `sendBeacon` vs XHR
+
+El `OTLPTraceExporter` usa `navigator.sendBeacon` por defecto al enviar spans. `sendBeacon` con content-type `application/json` requiere que el servidor responda con `Access-Control-Allow-Credentials: true`, lo cual puede fallar con ciertos proxies. Pasar `headers: {}` (objeto vacío) fuerza el uso de `XHR` que tiene mejor soporte de CORS (según issue [#3062](https://github.com/open-telemetry/opentelemetry-js/issues/3062) de opentelemetry-js).
+
+### `inject`/`extract` manual en el frontend (sin instrumentación fetch)
+
+Si por alguna razón no usas `FetchInstrumentation`, puedes inyectar el contexto manualmente:
+
+```ts
+import { propagation, context } from '@opentelemetry/api';
+
+async function enviarAudioManual(audioBytes: ArrayBuffer) {
+  const headers: Record<string, string> = {};
+  propagation.inject(context.active(), headers);  // agrega traceparent
+
+  await fetch('http://localhost:8000/audio', {
+    method: 'POST',
+    body: audioBytes,
+    headers,  // ← traceparent viaja en los headers
+  });
+}
+```
+
+---
+
 ## Resumen rápido
 
 - Los **logs** llevan `trace_id`/`span_id` para correlacionar con su traza; las **métricas** no vienen de los logs, se *derivan* de ellos o de las trazas.
@@ -575,3 +828,5 @@ flowchart TB
 - Un span cubre **todo lo que se ejecuta dentro de su bloque**, no solo la función envuelta.
 - El `with` **no propaga**: la inyección la hace la instrumentación (interceptores gRPC, headers de Kafka); sin ella, `inject`/`extract` manual al salir/entrar.
 - Las instrumentaciones viven en un repo aparte del SDK: `opentelemetry-python-contrib` (Python), `opentelemetry-go-contrib` (Go), `opentelemetry-java-instrumentation` (Java).
+- **Frontend (browser)**: solo HTTP/JSON (`:4318`), sin gRPC ni metrics SDK; CORS obligatorio en el collector; `FetchInstrumentation` propaga el `traceparent` a las APIs del backend automáticamente.
+- **Métricas**: las métricas de framework/librería (HTTP, gRPC, DB) las crea la **instrumentación** automáticamente; las de negocio las crea **el SDK** con código manual; las de runtime las crea el agente (Java) o las librerías de runtime (Node/Go).
