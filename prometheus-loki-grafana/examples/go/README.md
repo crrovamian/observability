@@ -185,3 +185,56 @@ go build -o bin/gateway  ./cmd/gateway/
 go build -o bin/processor ./cmd/processor/
 go build -o bin/storage   ./cmd/storage/
 ```
+
+## Cómo funciona el build (Docker multi-stage)
+
+### El Dockerfile compila los 3 binarios, no uno
+
+```dockerfile
+RUN go build -o /app/bin/gateway  ./cmd/gateway/
+RUN go build -o /app/bin/processor ./cmd/processor/
+RUN go build -o /app/bin/storage   ./cmd/storage/
+```
+
+Son 3 líneas `RUN` separadas. La imagen builder genera los 3 binarios en `/app/bin/`.
+
+### Multi-stage: por qué la imagen final es chica
+
+```
+Stage 1 (builder, ~800MB):    Go SDK + swag + compila los 3 binarios
+Stage 2 (final, ~15MB):       Solo alpine + los 3 binarios
+```
+
+La etapa `builder` se descarta completa. La imagen final solo lleva los binarios compilados + alpine minimalista. Los 3 binarios están ahí pero solo se ejecuta 1.
+
+### Cómo sabe cuál ejecutar: `command` sobreescribe `ENTRYPOINT`
+
+El Dockerfile define un ENTRYPOINT por defecto:
+
+```dockerfile
+ENTRYPOINT ["/app/bin/gateway"]
+```
+
+Pero `docker-compose.yaml` lo sobreescribe con `command` por servicio:
+
+```yaml
+gateway:
+  command: /app/bin/gateway    # ← sobreescribe ENTRYPOINT
+
+processor:
+  command: /app/bin/processor  # ← sobreescribe ENTRYPOINT
+
+storage:
+  command: /app/bin/storage    # ← sobreescribe ENTRYPOINT
+```
+
+Resultado: **1 imagen, 3 containers distintos**. Cada container ejecuta un binario diferente del mismo artefacto.
+
+### `go.mod` y `go.sum` ≈ `package.json` y `package-lock.json`
+
+| Node.js | Go | Qué hace |
+|---------|-----|----------|
+| `package.json` | `go.mod` | Lista las dependencias y versiones que **querés** |
+| `package-lock.json` | `go.sum` | Lockea versiones exactas + hashes SHA para integridad |
+
+La diferencia: en Go no hay `node_modules/` — las dependencias se descargan a un cache global (`~/go/pkg/mod/`). El comando `go mod tidy` es equivalente a `npm install`.
