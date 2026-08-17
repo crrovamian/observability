@@ -1,0 +1,167 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "contact": {}
+    },
+    "paths": {
+        "/process": {
+            "get": {
+                "description": "Recibe N items y los procesa secuencialmente a través de processor → storage, simulando streaming por partes",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gateway"
+                ],
+                "summary": "Procesa items en streaming",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Número de items a procesar",
+                        "name": "items",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.ProcessResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/process-item": {
+            "post": {
+                "description": "Recibe un item, lo procesa y lo envía al storage",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "processor"
+                ],
+                "summary": "Procesa un item",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID del item",
+                        "name": "id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Índice del item",
+                        "name": "index",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/demo-go_cmd_processor.ItemResult"
+                        }
+                    }
+                }
+            }
+        },
+        "/store-item": {
+            "post": {
+                "description": "Recibe un item y lo almacena (simula persistencia)",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "storage"
+                ],
+                "summary": "Almacena un item",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "ID del item",
+                        "name": "id",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/demo-go_cmd_storage.ItemResult"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "demo-go_cmd_gateway.ItemResult": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "example": "item-0"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "stored"
+                }
+            }
+        },
+        "demo-go_cmd_processor.ItemResult": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "demo-go_cmd_storage.ItemResult": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.ProcessResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "integer",
+                    "example": 5
+                },
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/demo-go_cmd_gateway.ItemResult"
+                    }
+                },
+                "status": {
+                    "type": "string",
+                    "example": "completed"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,110 @@
+definitions:
+  demo-go_cmd_gateway.ItemResult:
+    properties:
+      id:
+        example: item-0
+        type: string
+      status:
+        example: stored
+        type: string
+    type: object
+  demo-go_cmd_processor.ItemResult:
+    properties:
+      id:
+        type: string
+      status:
+        type: string
+    type: object
+  demo-go_cmd_storage.ItemResult:
+    properties:
+      id:
+        type: string
+      status:
+        type: string
+    type: object
+  main.ProcessResponse:
+    properties:
+      items:
+        example: 5
+        type: integer
+      results:
+        items:
+          $ref: '#/definitions/demo-go_cmd_gateway.ItemResult'
+        type: array
+      status:
+        example: completed
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /process:
+    get:
+      consumes:
+      - application/json
+      description: Recibe N items y los procesa secuencialmente a través de processor
+        → storage, simulando streaming por partes
+      parameters:
+      - description: Número de items a procesar
+        in: query
+        name: items
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.ProcessResponse'
+      summary: Procesa items en streaming
+      tags:
+      - gateway
+  /process-item:
+    post:
+      consumes:
+      - application/json
+      description: Recibe un item, lo procesa y lo envía al storage
+      parameters:
+      - description: ID del item
+        in: query
+        name: id
+        required: true
+        type: string
+      - description: Índice del item
+        in: query
+        name: index
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/demo-go_cmd_processor.ItemResult'
+      summary: Procesa un item
+      tags:
+      - processor
+  /store-item:
+    post:
+      consumes:
+      - application/json
+      description: Recibe un item y lo almacena (simula persistencia)
+      parameters:
+      - description: ID del item
+        in: query
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/demo-go_cmd_storage.ItemResult'
+      summary: Almacena un item
+      tags:
+      - storage
+swagger: "2.0"
