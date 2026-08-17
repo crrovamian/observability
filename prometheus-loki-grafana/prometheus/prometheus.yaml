@@ -15,7 +15,5 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # Agrega aquí tus servicios si exponen métricas
-  - job_name: 'nginx-demo'
-    static_configs:
-      - targets: ['nginx-demo:80']
+  # Las métricas de tus apps llegan por OTLP via otel-collector
+  # No es necesario agregarlas aquí
