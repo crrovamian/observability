@@ -18,32 +18,6 @@ receivers:
             - "Content-Type"
           max_age: 7200
 
-  filelog/docker:
-    storage: file_storage
-    include:
-      - /var/lib/docker/containers/*/*-json.log
-    exclude:
-      - /var/lib/docker/containers/*otel-collector*/*-json.log
-    start_at: beginning
-    include_file_path: true
-    operators:
-      - type: json_parser
-        timestamp:
-          parse_from: attributes.time
-          layout: '%Y-%m-%dT%H:%M:%S.%L%Z'
-      - type: move
-        from: attributes.log
-        to: body
-      - type: regex_parser
-        regex: '^/var/lib/docker/containers/(?P<container_id>[a-f0-9]+)/'
-        parse_from: resource["log.file.path"]
-      - type: copy
-        from: attributes.container_id
-        to: resource["container.id"]
-      - type: add
-        field: resource["service.name"]
-        value: docker
-
   filelog/system:
     storage: file_storage
     include:
@@ -88,7 +62,7 @@ service:
       exporters: [otlp/tempo, debug]
 
     logs:
-      receivers: [otlp, filelog/docker, filelog/system]
+      receivers: [otlp, filelog/system]
       processors: [batch]
       exporters: [otlphttp/loki, debug]
 
