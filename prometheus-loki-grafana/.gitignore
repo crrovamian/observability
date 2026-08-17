@@ -1,1 +1,9 @@
 /data
+
+# Go
+/examples/go/gateway
+/examples/go/processor
+/examples/go/storage
+
+# Swagger (generado por swag init, el Dockerfile lo regenera)
+/examples/go/docs/

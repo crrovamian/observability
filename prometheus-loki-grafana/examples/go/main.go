@@ -40,7 +40,7 @@ func initTracer() *sdktrace.TracerProvider {
 var tracer = otel.Tracer("demo-go")
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	ctx, span := tracer.Start(r.Context(), "handler")
+	_, span := tracer.Start(r.Context(), "handler")
 	defer span.End()
 	span.SetAttributes(attribute.String("http.method", r.Method))
 	time.Sleep(50 * time.Millisecond)

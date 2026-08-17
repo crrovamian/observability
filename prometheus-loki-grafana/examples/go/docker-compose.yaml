@@ -1,0 +1,36 @@
+services:
+  gateway:
+    build: .
+    command: /app/bin/gateway
+    ports:
+      - "8080:8080"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      PROCESSOR_ADDR: processor:50051
+    networks:
+      - monitoring
+    depends_on:
+      - processor
+
+  processor:
+    build: .
+    command: /app/bin/processor
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      STORAGE_ADDR: storage:50052
+    networks:
+      - monitoring
+    depends_on:
+      - storage
+
+  storage:
+    build: .
+    command: /app/bin/storage
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+    external: true
