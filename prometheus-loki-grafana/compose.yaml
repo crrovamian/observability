@@ -96,7 +96,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-collector
-    user: root
+    user: "0:0"
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml
       - otelcol_data:/var/lib/otelcol
