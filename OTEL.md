@@ -392,6 +392,46 @@ No necesitas envolver cada función: envuelves la operación y todo lo que ejecu
 
 El problema: cada servicio es un proceso distinto, el contexto (trace_id + parent) no viaja solo. OTel lo resuelve con **propagación**: el cliente **inyecta** el contexto en la llamada y el servidor lo **extrae**.
 
+#### Formato del header `traceparent`
+
+El header W3C tiene 4 campos separados por guiones:
+
+```
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+              │   │                                │                │
+              │   trace_id (32 hex = 16 bytes)     span_id (16 hex) flags
+              version (00)
+```
+
+| Campo | Qué es | Ejemplo |
+|-------|--------|---------|
+| `version` | Versión del formato (siempre `00` hoy) | `00` |
+| `trace_id` | ID único de la traza (16 bytes, 32 hex) | `4bf92f3577b34da6a3ce929d0e0e4736` |
+| `parent_span_id` | Span ID del padre (quién hizo la llamada) | `00f067aa0ba902b7` |
+| `trace_flags` | `01` = sampleado, `00` = no sampleado | `01` |
+
+El `parent_span_id` es lo que conecta el árbol: el span del servidor lo usa como padre para que la traza quede continua.
+
+#### `baggage` — contexto custom que viaja con la traza
+
+Además de `traceparent`, el estándar W3C define `baggage` para transportar key-value arbitrarios que viajan con cada request:
+
+```
+baggage: userId=123, sessionId=abc, tenant=prod
+```
+
+OTel lo usa poco, pero es útil para propagar contexto de negocio (no de observabilidad) entre servicios sin definir headers custom.
+
+#### Dónde viaja según el transporte
+
+| Transporte | Dónde se inyecta | Quién lo hace (con instrumentación) |
+|------------|-------------------|--------------------------------------|
+| HTTP | Header `traceparent` (y `baggage`) | `FetchInstrumentation`, `RequestsInstrumentation`, etc. |
+| gRPC | **Metadata** del call (`[("traceparent", "00-...")]`) | `GrpcInstrumentorClient` / `GrpcInstrumentorServer` |
+| Kafka | **Headers** del mensaje (`[("traceparent", b"00-...")]`) | `ConfluentKafkaInstrumentor` |
+
+`propagation.inject()` y `propagation.extract()` son las funciones del SDK que escriben/leen este header en el formato correcto para cada transporte.
+
 - **HTTP**: header `traceparent` (W3C): `traceparent: 00-<trace_id>-<span_id>-01`
 - **gRPC**: el contexto viaja en los **metadata** de la llamada (mismo formato, un interceptor lo inyecta).
 
