@@ -15,7 +15,7 @@ services:
       - '--web.enable-lifecycle'
       - '--web.enable-remote-write-receiver'
     ports:
-      - "9090:9090"
+      - "9092:9090"
     restart: unless-stopped
     networks:
       - monitoring
@@ -50,7 +50,7 @@ services:
       - GF_INSTALL_PLUGINS=grafana-clock-panel
 
     ports:
-      - "3001:3000"
+      - "3002:3000"
     restart: unless-stopped
     networks:
       - monitoring
